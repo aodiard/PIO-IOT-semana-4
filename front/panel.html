@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IES 9-010 - Dashboard IoT Reactivo</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #0f172a;
+            color: #f8fafc;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+        }
+
+        .card {
+            background-color: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 14px;
+            padding: 28px;
+            width: 360px;
+            text-align: center;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+        }
+
+        .badge {
+            background-color: #0284c7;
+            color: #ffffff;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .metric-temp {
+            font-size: 3.5rem;
+            font-weight: 800;
+            color: #38bdf8;
+            margin: 18px 0 4px 0;
+            font-family: monospace;
+        }
+
+        .metric-hum {
+            color: #94a3b8;
+            font-size: 1.1rem;
+            margin-bottom: 22px;
+        }
+
+        .divider {
+            border: 0;
+            height: 1px;
+            background-color: #334155;
+            margin: 20px 0;
+        }
+
+        .btn-actuador {
+            width: 100%;
+            padding: 14px;
+            font-size: 1rem;
+            font-weight: 700;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background-color 0.2s, transform 0.1s;
+        }
+
+        .btn-actuador:active {
+            transform: scale(0.98);
+        }
+
+        .btn-off {
+            background-color: #ef4444;
+            color: #ffffff;
+        }
+
+        .btn-on {
+            background-color: #22c55e;
+            color: #0f172a;
+        }
+
+        .status-box {
+            margin-top: 16px;
+            font-size: 0.85rem;
+            color: #94a3b8;
+        }
+
+        .status-ack {
+            font-weight: 700;
+            letter-spacing: 0.03em;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="card">
+        <span class="badge">Nodo 01 • Telemetría Perimetral</span>
+        <div class="metric-temp" id="lbl-temp">--.- °C</div>
+        <div class="metric-hum">Humedad: <span id="lbl-hum" style="color: #ffffff; font-weight: 600;">-- %</span></div>
+
+        <hr class="divider">
+
+        <h4 style="margin: 0 0 12px 0; font-size: 1rem; color: #cbd5e1;">Control de Actuador (GPIO 2)</h4>
+        <button id="btn-rele" class="btn-actuador btn-off" onclick="conmutarActuador()">ENVIAR: ENCENDER</button>
+
+        <div class="status-box">
+            Confirmación de Hardware: <br>
+            <span id="lbl-ack" class="status-ack" style="color: #f59e0b;">ESPERANDO RETORNO...</span>
+        </div>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getDatabase, ref, onValue, set } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+
+        // Configuración del endpoint de Firebase Realtime Database
+        const firebaseConfig = {
+            databaseURL: "Completar con la URL de su proyecto"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app);
+        let estadoDeseado = false;
+
+        // 1. Oyente Reactivo de Telemetría (WebSockets con onValue)
+        onValue(ref(db, "nodos/nodo_01/telemetria"), (snapshot) => {
+            if (snapshot.exists()) {
+                const data = snapshot.val();
+                if (data.temperatura !== undefined) {
+                    document.getElementById("lbl-temp").innerText = `${data.temperatura.toFixed(1)} °C`;
+                }
+                if (data.humedad !== undefined) {
+                    document.getElementById("lbl-hum").innerText = `${data.humedad.toFixed(1)} %`;
+                }
+            }
+        });
+
+        // 2. Oyente de Confirmación Real del ESP32 (Principio de Acknowledge)
+        onValue(ref(db, "nodos/nodo_01/telemetria/rele_confirmado"), (snapshot) => {
+            if (snapshot.exists()) {
+                const confirmado = snapshot.val();
+                const lbl = document.getElementById("lbl-ack");
+                lbl.innerText = confirmado ? "ENCENDIDO (FÍSICO)" : "APAGADO (FÍSICO)";
+                lbl.style.color = confirmado ? "#22c55e" : "#ef4444";
+            }
+        });
+
+        // 3. Despacho descendente de comandos hacia /control/
+        window.conmutarActuador = function () {
+            estadoDeseado = !estadoDeseado;
+            const btn = document.getElementById("btn-rele");
+            btn.innerText = estadoDeseado ? "ENVIAR: APAGAR" : "ENVIAR: ENCENDER";
+            btn.className = estadoDeseado ? "btn-actuador btn-on" : "btn-actuador btn-off";
+
+            // Escribimos en la rama de control NoSQL
+            set(ref(db, "nodos/nodo_01/control/rele_estado"), estadoDeseado);
+        };
+    </script>
+
+</body>
+
+</html>
