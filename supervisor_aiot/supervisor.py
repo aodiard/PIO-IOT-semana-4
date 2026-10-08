@@ -1,3 +1,12 @@
+"""
+Project: AIoT Supervision System - Unit 4
+Script Name: supervisor.py
+Version: 1.1.0
+
+Parameters:
+    - GEMINI_API_KEY: Google Gemini API authentication key provided via environment variable.
+"""
+
 import os
 import json
 import asyncio
@@ -18,7 +27,6 @@ ENDPOINT_CONTROL = f"{RUTA_NODO}/control/rele_estado.json"
 ENDPOINT_AUDITORIA = f"{RUTA_NODO}/auditoria_ia.json"
 
 UMBRAL_TEMPERATURA_CRITICA = 35.0
-INTERVALO_REVISION_SEGUNDOS = 3.0
 
 mitigacion_activa = False
 
@@ -51,7 +59,8 @@ def consultar_supervisor_gemini(temperatura: float, humedad: float) -> dict:
             model="gemini-2.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
-                response_mime_type="application/json"
+                response_mime_type="application/json",
+                tools=[]
             )
         )
         return json.loads(respuesta.text)
@@ -60,55 +69,74 @@ def consultar_supervisor_gemini(temperatura: float, humedad: float) -> dict:
         return {
             "alerta": True,
             "accion_rele": True,
-            "diagnostico": "Protocolo de emergencia activado por tiempo de espera agotado en la API del supervisor."
+            "diagnostico": "Protocolo de emergencia activado por fallo en la API."
         }
 
 
-async def ciclo_supervision_continua():
+def procesar_evento_telemetria(datos_telemetria: dict):
     global mitigacion_activa
-    print("[SUPERVISOR] Tarea centinela iniciada. Monitoreando Nodo 01 en Firebase...")
+    if not isinstance(datos_telemetria, dict):
+        return
 
+    temp = float(datos_telemetria.get("temperatura", 0.0))
+    hum = float(datos_telemetria.get("humedad", 0.0))
+
+    # Caso A: Anomalía térmica detectada
+    if temp >= UMBRAL_TEMPERATURA_CRITICA and not mitigacion_activa:
+        print(f"\n[EVENTO STREAM] ⚠️ Temperatura crítica detectada: {temp} °C. Consultando a Gemini...")
+        decision = consultar_supervisor_gemini(temp, hum)
+        print(f"[AUDITORÍA GEMINI] Dictamen recibido: {decision}")
+
+        if decision.get("accion_rele") is True:
+            requests.put(ENDPOINT_CONTROL, json=True, timeout=3)
+            requests.patch(ENDPOINT_AUDITORIA, json=decision, timeout=3)
+            mitigacion_activa = True
+            print("[ACCIÓN] ✅ Activación de relé enviada a Firebase (Mitigación activa).")
+
+    # Caso B: Regreso a parámetros seguros
+    elif temp < UMBRAL_TEMPERATURA_CRITICA and mitigacion_activa:
+        print(f"\n[EVENTO STREAM] Temperatura normalizada ({temp} °C). Desactivando relé...")
+        requests.put(ENDPOINT_CONTROL, json=False, timeout=3)
+        
+        registro_restablecimiento = {
+            "alerta": False,
+            "accion_rele": False,
+            "diagnostico": f"Parámetros nominales restablecidos ({temp} °C)."
+        }
+        requests.patch(ENDPOINT_AUDITORIA, json=registro_restablecimiento, timeout=3)
+        mitigacion_activa = False
+        print("[ACCIÓN] 🔄 Nodo restablecido a modo reposo.")
+
+
+def escuchar_stream_firebase():
+    """Conexión persistente SSE (Server-Sent Events) sin polling cíclico."""
+    headers = {"Accept": "text/event-stream"}
+    print("[SUPERVISOR] Abriendo canal SSE en tiempo real con Firebase...")
+    
+    with requests.get(ENDPOINT_TELEMETRIA, headers=headers, stream=True, timeout=90) as stream_resp:
+        for linea in stream_resp.iter_lines(decode_unicode=True):
+            if linea and linea.startswith("data:"):
+                payload_str = linea[5:].strip()
+                if payload_str and payload_str != "null":
+                    try:
+                        evento = json.loads(payload_str)
+                        # Firebase envía los datos bajo la clave 'data' en eventos SSE
+                        datos = evento.get("data") if isinstance(evento, dict) and "data" in evento else evento
+                        if isinstance(datos, dict):
+                            procesar_evento_telemetria(datos)
+                    except json.JSONDecodeError:
+                        pass
+
+
+async def ciclo_supervision_continua():
+    print("[SUPERVISOR] Tarea centinela reactiva iniciada.")
     while True:
         try:
-            respuesta = requests.get(ENDPOINT_TELEMETRIA, timeout=3)
-            
-            if respuesta.status_code == 200 and respuesta.json():
-                telemetria = respuesta.json()
-                temp = float(telemetria.get("temperatura", 0.0))
-                hum = float(telemetria.get("humedad", 0.0))
-
-                # Caso A: Temperatura crítica detectada
-                if temp >= UMBRAL_TEMPERATURA_CRITICA and not mitigacion_activa:
-                    print(f"\n[ALERTA] ⚠️ Temperatura crítica detectada: {temp} °C. Consultando a Gemini...")
-                    decision = consultar_supervisor_gemini(temp, hum)
-                    print(f"[AUDITORÍA GEMINI] Dictamen recibido: {decision}")
-
-                    if decision.get("accion_rele") is True:
-                        requests.put(ENDPOINT_CONTROL, json=True, timeout=3)
-                        requests.patch(ENDPOINT_AUDITORIA, json=decision, timeout=3)
-                        mitigacion_activa = True
-                        print("[ACCIÓN] ✅ Activación de relé enviada a Firebase (Mitigación activa).")
-
-                # Caso B: Regreso a parámetros seguros
-                elif temp < UMBRAL_TEMPERATURA_CRITICA and mitigacion_activa:
-                    print(f"\n[INFO] Temperatura normalizada ({temp} °C). Desactivando relé...")
-                    requests.put(ENDPOINT_CONTROL, json=False, timeout=3)
-                    
-                    registro_restablecimiento = {
-                        "alerta": False,
-                        "accion_rele": False,
-                        "diagnostico": f"Parámetros nominales restablecidos ({temp} °C)."
-                    }
-                    requests.patch(ENDPOINT_AUDITORIA, json=registro_restablecimiento, timeout=3)
-                    mitigacion_activa = False
-                    print("[ACCIÓN] 🔄 Nodo restablecido a modo reposo.")
-
-        except requests.RequestException as err_red:
-            print(f"[ERROR DE RED] {err_red}")
-        except Exception as err_gen:
-            print(f"[ERROR GENERAL] {err_gen}")
-
-        await asyncio.sleep(INTERVALO_REVISION_SEGUNDOS)
+            # Ejecuta la escucha bloqueante en un hilo sin congelar el event loop de asyncio
+            await asyncio.to_thread(escuchar_stream_firebase)
+        except Exception as err:
+            print(f"[RECONEXIÓN STREAM] Conexión reiniciada: {err}")
+            await asyncio.sleep(2)
 
 
 @asynccontextmanager
@@ -120,8 +148,8 @@ async def ciclo_de_vida(app: FastAPI):
 
 app = FastAPI(
     title="Supervisor AIoT - IES 9-010",
-    description="Supervisor cognitivo industrial que conecta Firebase RTDB con Google Gemini.",
-    version="1.0.0",
+    description="Supervisor cognitivo industrial 100% reactivo conectado por SSE a Firebase.",
+    version="1.1.0",
     lifespan=ciclo_de_vida
 )
 
@@ -130,6 +158,7 @@ app = FastAPI(
 def estado_servicio():
     return {
         "estado": "en_linea",
+        "modo": "streaming_sse_event_driven",
         "servicio": "Supervisor Autónomo AIoT",
         "mitigacion_activa": mitigacion_activa,
         "nodo_monitoreado": RUTA_NODO
